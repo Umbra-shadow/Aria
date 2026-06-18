@@ -1,0 +1,20 @@
+# Kioku engine — install into a venv: python3 -m venv .venv && .venv/bin/pip install -r engine/requirements.txt
+httpx>=0.28
+pydantic>=2.7
+tenacity>=8.3
+fastapi>=0.115
+uvicorn[standard]>=0.30
+slowapi>=0.1.9
+python-ulid>=2.7
+
+# Researcher: PDF reports (pure-python) + web search + HTML extraction.
+fpdf2>=2.7
+lxml>=5
+ddgs>=9
+# Postgres/Neon support is optional — see requirements-postgres.txt.
+# SQLite (stdlib) is the default; no extra install needed for the local demo.
+
+# test
+pytest>=8
+pytest-asyncio>=0.23
+respx>=0.21

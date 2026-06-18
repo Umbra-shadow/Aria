@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Aria — live dialogue, made cinematic</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=DM+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <nav class="nav">
+    <span class="brand"><span class="jp">詠</span>Aria</span>
+    <span class="tag">Track 2 · live dialogue with memory</span>
+    <div class="key-wrap">
+      <input id="key" type="password" placeholder="Enter your Qwen API key" />
+      <button class="btn ghost" id="saveKey">Save</button>
+      <span class="keystate" id="keyState">no key</span>
+    </div>
+  </nav>
+
+  <div class="split">
+    <!-- LEFT: the machinery -->
+    <div class="left">
+      <div class="topic-box">
+        <div class="label">Give them a topic</div>
+        <div class="topic-row">
+          <input id="topic" placeholder="The future of electric cars" />
+          <button class="btn" id="go">Start</button>
+        </div>
+        <div class="examples" id="examples">
+          <span class="chip">The future of electric cars</span>
+          <span class="chip">Is remote work better for creativity?</span>
+          <span class="chip">Will cities ever be car-free?</span>
+        </div>
+      </div>
+      <div class="stream" id="stream">
+        <div class="empty" id="empty">Type a topic and press <b>Start</b>. Two minds — Theo &amp; Mara — will talk it through, each remembering what the other said.</div>
+      </div>
+    </div>
+
+    <!-- RIGHT: the video -->
+    <div class="right">
+      <div class="label">The scene</div>
+      <div class="stage">
+        <span class="video-badge" id="videoBadge">placeholder</span>
+        <div class="scene-card" id="card">
+          <div class="caption" id="caption" style="display:none">
+            <div class="cwho" id="cwho"></div>
+            <div class="ctext" id="ctext"></div>
+          </div>
+        </div>
+      </div>
+      <div class="scene-meta" id="sceneMeta">A couple on a bench. The video renders each line as they speak it.</div>
+    </div>
+  </div>
+
+  <script src="app.js?v=1"></script>
+</body>
+</html>

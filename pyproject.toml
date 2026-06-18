@@ -1,0 +1,12 @@
+[project]
+name = "aria"
+version = "0.1.0"
+description = "Aria — two remembering minds in live dialogue, made cinematic (Qwen hackathon, Track 2)"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+[tool.pytest.ini_options]
+testpaths = ["engine/tests"]
+pythonpath = ["."]
+addopts = "-q"
+asyncio_mode = "auto"

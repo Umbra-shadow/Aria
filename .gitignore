@@ -1,0 +1,35 @@
+# secrets — never committed. .env is Qwen-only; .env.local holds personal
+# overrides (e.g. a Gemini test key) and must never be committed. Only the
+# Qwen-only .env.example is tracked.
+.env
+.env.*
+!.env.example
+
+# personal planning / notes — for me only, never deployed
+*.private.md
+PLAN.md
+NOTES.md
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# substrate + data artifacts
+*.disk
+*.sock
+aria_data/
+kioku_data/
+substrate/kiokud
+substrate/kiokud_tests
+substrate/cadran_tests
+substrate/cadran_engine
+
+# media the video layer renders locally
+aria_media/
+*.mp4
+
+# editors
+.idea/
+.vscode/
