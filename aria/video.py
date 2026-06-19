@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Guardianity — Aria (Track 2)
-"""The right-hand pane: turn dialogue into video.
+"""The right-hand pane: turn each scene into a REAL talking video.
 
-A pluggable backend so Aria runs *today* without a key and lights up for real
-when one is present:
+Aria's world is shown with live text-to-video generation on Alibaba's
+**HappyHorse-1.0** model (DashScope / Model Studio) — native 720p/1080p video with
+integrated, lip-synced audio, so the guide actually *speaks* the line on screen.
+The same ``DASHSCOPE_API_KEY`` that powers the Qwen brain powers the video too.
 
-  • ``HappyHorseBackend`` — Alibaba's HappyHorse-1.0 text-to-video (synced audio,
-    character-consistent across turns). Best-effort adapter; downgrades to the
-    placeholder on any failure so a turn is never lost.
-  • ``PlaceholderBackend`` — returns a "scene card": the outdoor scene description
-    + the spoken caption + a soft animated gradient. The split-screen UI stays
-    whole even with no video key.
+DashScope video is asynchronous: **create a task, then poll** until it's ready.
+  • ``HappyHorseBackend`` — the real text-to-video, create + poll.
+  • ``PlaceholderBackend`` — a soft scene card, used ONLY as a fallback if a call
+    fails, never as the headline experience.
 
-Selection (``ARIA_VIDEO_MODE``): ``auto`` (HappyHorse if a key exists, else
-placeholder), ``happyhorse`` (force), or ``placeholder`` (force the demo mode).
+There is no advertised "run without a key" path: Aria needs a DashScope key.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import asdict, dataclass, field
@@ -27,27 +27,18 @@ import httpx
 
 log = logging.getLogger("aria.video")
 
-# The couple, fixed for character consistency across turns. Reference text now;
-# swap to reference images when HappyHorse reference-to-video is wired.
-COUPLE_SCENE = (
-    "A young couple sitting close on a wooden bench in a sunlit park, late "
-    "afternoon golden light, soft bokeh of trees behind them, occasional birds "
-    "passing, gentle ambient sound. Natural, warm, cinematic. They are having a "
-    "relaxed conversation."
-)
-
 
 @dataclass(frozen=True, slots=True)
 class VideoClip:
-    """What the right pane needs to show one turn."""
+    """What the right pane shows for one beat."""
 
     turn: int
-    speaker: str            # "a" | "b"
+    speaker: str            # "guide"
     kind: str               # "video" | "placeholder"
-    caption: str            # the line being spoken
-    scene: str              # the visual prompt / scene card text
-    url: str = ""           # clip URL when kind == "video"
-    audio_url: str = ""     # synced audio when provided separately
+    caption: str            # the guide's spoken line
+    scene: str              # the video prompt / scene text
+    url: str = ""           # generated video URL when kind == "video"
+    audio_url: str = ""     # empty — HappyHorse bakes audio into the video file
     meta: dict[str, Any] = field(default_factory=dict)
 
     def public(self) -> dict[str, Any]:
@@ -55,128 +46,150 @@ class VideoClip:
 
 
 class VideoBackend:
-    """Interface every backend implements."""
-
     name = "base"
 
-    async def render_turn(self, *, turn: int, speaker: str, line: str, topic: str) -> VideoClip:
+    async def render_scene(self, *, turn: int, prompt: str, caption: str, emotion: str) -> VideoClip:
         raise NotImplementedError
 
-    async def aclose(self) -> None:  # pragma: no cover - default no-op
+    async def aclose(self) -> None:  # pragma: no cover
         pass
 
 
 class PlaceholderBackend(VideoBackend):
-    """No key needed. A tasteful scene card so the UI is always whole."""
+    """Fallback only — a scene card if video generation is unavailable."""
 
     name = "placeholder"
 
-    async def render_turn(self, *, turn: int, speaker: str, line: str, topic: str) -> VideoClip:
-        who = "She" if speaker == "b" else "He"
-        scene = f"{COUPLE_SCENE} Topic: {topic}. {who} is speaking now."
-        return VideoClip(
-            turn=turn, speaker=speaker, kind="placeholder",
-            caption=line, scene=scene,
-            meta={"reason": "no video key — live captions over an animated scene"},
-        )
+    async def render_scene(self, *, turn: int, prompt: str, caption: str, emotion: str) -> VideoClip:
+        return VideoClip(turn=turn, speaker="guide", kind="placeholder", caption=caption,
+                         scene=prompt, meta={"emotion": emotion,
+                                             "reason": "video generation unavailable — add a DashScope key"})
 
 
 class HappyHorseBackend(VideoBackend):
-    """HappyHorse-1.0 text-to-video adapter (best-effort, downgrades cleanly).
+    """Alibaba HappyHorse-1.0 text-to-video (DashScope Model Studio), async.
 
-    The exact request/response shape is pinned once a real key is available; the
-    adapter is written against the OpenAI-compatible video surface and falls back
-    to the placeholder on any error so a turn is never dropped.
+    Create:  POST {base}/api/v1/services/aigc/video-generation/video-synthesis
+             header  X-DashScope-Async: enable
+             {"model","input":{"prompt"},"parameters":{"resolution","duration","audio"}}
+             → output.task_id
+    Poll:    GET  {base}/api/v1/tasks/{task_id}  until task_status SUCCEEDED/FAILED
+             → the video URL (a file with lip-synced audio baked in).
     """
 
     name = "happyhorse"
 
-    def __init__(self, base_url: str, api_key: str, model: str) -> None:
+    def __init__(self, base_url: str, api_key: str, model: str, *,
+                 resolution: str, duration: int, timeout_s: int, poll_s: float) -> None:
         self.model = model
+        self.resolution = resolution
+        self.duration = duration
+        self.timeout_s = timeout_s
+        self.poll_s = poll_s
         self._fallback = PlaceholderBackend()
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout=httpx.Timeout(60.0, connect=10.0),
         )
 
-    async def render_turn(self, *, turn: int, speaker: str, line: str, topic: str) -> VideoClip:
-        who = "the woman" if speaker == "b" else "the man"
-        prompt = (
-            f"{COUPLE_SCENE} They are discussing: {topic}. In this shot, {who} "
-            f"says: \"{line}\". Lip-synced speech, natural delivery, ambient park "
-            f"audio. Keep both characters visually consistent with previous shots."
-        )
+    async def render_scene(self, *, turn: int, prompt: str, caption: str, emotion: str) -> VideoClip:
+        # The character performs the scene briefly, then turns to the viewer and
+        # waits — looking right at you, gesturing, ready for your reply.
+        full = (f"{prompt} The character performs this briefly, then turns and looks "
+                f"directly at the viewer, attentive and waiting for a reply, with natural "
+                f"gestures — pointing to show the way when relevant. They speak, lip-synced "
+                f'with natural audio, saying: "{caption}". '
+                f"Mood: {emotion}. About 5–6 seconds, cinematic, photoreal, smooth motion.")
         try:
-            data = await self._post_video(prompt)
-            url, audio = _extract_media(data)
+            task_id = await self._create(full)
+            url = await self._poll(task_id)
             if not url:
-                raise ValueError("no video url in response")
-            return VideoClip(
-                turn=turn, speaker=speaker, kind="video", caption=line,
-                scene=prompt, url=url, audio_url=audio, meta={"model": self.model},
-            )
-        except Exception as e:  # noqa: BLE001 — never lose a turn to the video layer
-            log.warning("HappyHorse render failed (turn %d), using placeholder: %s", turn, e)
-            clip = await self._fallback.render_turn(turn=turn, speaker=speaker, line=line, topic=topic)
+                raise ValueError("no video url in finished task")
+            return VideoClip(turn=turn, speaker="guide", kind="video", caption=caption,
+                             scene=prompt, url=url, meta={"model": self.model, "emotion": emotion})
+        except Exception as e:  # noqa: BLE001 — never lose a beat to the video layer
+            log.warning("HappyHorse render failed (beat %d), placeholder: %s", turn, e)
+            clip = await self._fallback.render_scene(turn=turn, prompt=prompt, caption=caption, emotion=emotion)
             return VideoClip(**{**clip.public(), "meta": {**clip.meta, "happyhorse_error": str(e)}})
 
-    async def _post_video(self, prompt: str) -> dict[str, Any]:
+    async def _create(self, prompt: str) -> str:
         payload = {
             "model": self.model,
             "input": {"prompt": prompt},
-            "parameters": {"duration": 6, "resolution": "1080p", "audio": True},
+            "parameters": {"resolution": self.resolution, "duration": self.duration, "audio": True},
         }
-        resp = await self._client.post("/video/generations", json=payload)
+        resp = await self._client.post(
+            "/api/v1/services/aigc/video-generation/video-synthesis",
+            json=payload, headers={"X-DashScope-Async": "enable"})
         if resp.status_code >= 400:
-            raise ValueError(f"HTTP {resp.status_code}: {resp.text[:300]}")
-        return resp.json()
+            raise ValueError(f"create HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        task_id = (data.get("output") or {}).get("task_id")
+        if not task_id:
+            raise ValueError(f"no task_id: {str(data)[:200]}")
+        return task_id
+
+    async def _poll(self, task_id: str) -> str:
+        deadline = asyncio.get_event_loop().time() + self.timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            resp = await self._client.get(f"/api/v1/tasks/{task_id}")
+            if resp.status_code >= 400:
+                raise ValueError(f"poll HTTP {resp.status_code}: {resp.text[:200]}")
+            out = resp.json().get("output") or {}
+            status = (out.get("task_status") or "").upper()
+            if status == "SUCCEEDED":
+                return _extract_video(out)
+            if status in ("FAILED", "CANCELED", "UNKNOWN"):
+                raise ValueError(f"task {status}: {str(out)[:200]}")
+            await asyncio.sleep(self.poll_s)
+        raise ValueError(f"video generation timed out after {self.timeout_s}s")
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
 
-def _extract_media(data: dict[str, Any]) -> tuple[str, str]:
-    """Tolerant extraction across plausible response shapes."""
-    # OpenAI-style: {"data": [{"url": ...}]}; dashscope-style: {"output": {...}}
-    for path in (
-        lambda d: d["data"][0]["url"],
-        lambda d: d["output"]["video_url"],
-        lambda d: d["output"]["results"][0]["url"],
-        lambda d: d["video_url"],
-    ):
+def _extract_video(out: dict[str, Any]) -> str:
+    paths = (
+        lambda o: o["video_url"],
+        lambda o: o["results"][0]["url"],
+        lambda o: o["results"][0]["video_url"],
+        lambda o: o["results"]["video_url"],
+    )
+    for path in paths:
         try:
-            url = path(data)
-            if isinstance(url, str) and url:
-                break
+            url = path(out)
+            if isinstance(url, str) and url.startswith("http"):
+                return url
         except (KeyError, IndexError, TypeError):
             continue
-    else:
-        url = ""
-    audio = ""
-    for path in (lambda d: d["output"]["audio_url"], lambda d: d["audio_url"]):
-        try:
-            a = path(data)
-            if isinstance(a, str) and a:
-                audio = a
-                break
-        except (KeyError, IndexError, TypeError):
-            continue
-    return url, audio
+    return ""
 
 
 def build_video_backend() -> VideoBackend:
-    """Choose a backend from the environment. Safe with no key."""
+    """Build the video backend. Uses the DashScope key (shared with the brain).
+
+    ``ARIA_VIDEO_MODE``: ``auto`` (HappyHorse if a key exists, else placeholder) |
+    ``happyhorse`` (force) | ``placeholder`` (force the fallback).
+    """
     mode = os.environ.get("ARIA_VIDEO_MODE", "auto").strip().lower()
-    key = os.environ.get("HAPPYHORSE_API_KEY", "").strip()
-    base = os.environ.get("HAPPYHORSE_BASE_URL", "").strip()
-    model = os.environ.get("HAPPYHORSE_MODEL", "happyhorse-1.0-t2v").strip()
+    key = (os.environ.get("ARIA_VIDEO_KEY") or os.environ.get("QWEN_API_KEY")
+           or os.environ.get("DASHSCOPE_API_KEY") or "").strip()
+    base = os.environ.get("ARIA_VIDEO_BASE_URL", "https://dashscope-intl.aliyuncs.com").strip()
+    model = os.environ.get("ARIA_VIDEO_MODEL", "happyhorse-1.0-t2v").strip()
+    resolution = os.environ.get("ARIA_VIDEO_RESOLUTION", "1080P").strip()
+    try:
+        duration = int(os.environ.get("ARIA_VIDEO_DURATION", "5"))
+    except ValueError:
+        duration = 5
+    try:
+        timeout_s = int(os.environ.get("ARIA_VIDEO_TIMEOUT", "240"))
+    except ValueError:
+        timeout_s = 240
 
     if mode == "placeholder" or (mode == "auto" and not key):
-        log.info("Aria video backend: placeholder (mode=%s, key=%s)", mode, "set" if key else "none")
+        log.info("Aria scene backend: placeholder (no DashScope key yet — add one to generate video)")
         return PlaceholderBackend()
-    if not base:
-        log.warning("HappyHorse requested but HAPPYHORSE_BASE_URL is empty; using placeholder")
-        return PlaceholderBackend()
-    log.info("Aria video backend: happyhorse model=%s", model)
-    return HappyHorseBackend(base, key, model)
+    log.info("Aria scene backend: HappyHorse video model=%s %s %ds", model, resolution, duration)
+    return HappyHorseBackend(base, key, model, resolution=resolution, duration=duration,
+                             timeout_s=timeout_s, poll_s=3.0)
